@@ -19,58 +19,14 @@ build app="ghostty":
     ARCH=$(uname -m)
     OCI_DIR=".${APP}.oci"
 
-    _verify_labels() {
-        local registry_url="$1"
-        local tls_flag="${2:---tls-verify=true}"
-        skopeo inspect ${tls_flag} "${registry_url}" \
-          | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-labels = d.get('Labels', {})
-for k in ['org.flatpak.ref', 'org.flatpak.metadata']:
-    s = 'OK' if k in labels else 'MISSING'
-    print(f'{s}: {k}')
-    if s == 'MISSING': sys.exit(1)
-print('All required labels present.')
-"
-    }
-
     if [[ -f "${RELEASE_DESC}" ]]; then
         # === Bundle repack path (e.g. goose) ===
         # Download upstream .flatpak, verify sha256, import into OSTree, export as OCI
         echo "==> mode: bundle-repack (release.yaml)"
-        APP_ID=$(python3 -c "
-import sys
-for line in open(sys.argv[1]):
-    line = line.strip()
-    if line.startswith('app-id:'):
-        print(line.split(':', 1)[1].strip())
-        break
-" "${RELEASE_DESC}")
-        VERSION=$(python3 -c "
-import sys
-for line in open(sys.argv[1]):
-    line = line.strip()
-    if line.startswith('version:'):
-        print(line.split(':', 1)[1].strip())
-        break
-" "${RELEASE_DESC}")
-        URL=$(python3 -c "
-import sys
-for line in open(sys.argv[1]):
-    line = line.strip()
-    if line.startswith('url:'):
-        print(line.split(':', 1)[1].strip())
-        break
-" "${RELEASE_DESC}")
-        EXPECTED_SHA=$(python3 -c "
-import sys
-for line in open(sys.argv[1]):
-    line = line.strip()
-    if line.startswith('sha256:'):
-        print(line.split(':', 1)[1].strip())
-        break
-" "${RELEASE_DESC}")
+        APP_ID=$(yq '.app-id' "${RELEASE_DESC}")
+        VERSION=$(yq '.version' "${RELEASE_DESC}")
+        URL=$(yq '.url' "${RELEASE_DESC}")
+        EXPECTED_SHA=$(yq '.sha256' "${RELEASE_DESC}")
         [[ -n "${APP_ID}" && -n "${VERSION}" && -n "${URL}" && -n "${EXPECTED_SHA}" ]] \
           || { echo "ERROR: release.yaml missing required fields" >&2; exit 1; }
         REF="app/${APP_ID}/${ARCH}/stable"
@@ -87,6 +43,12 @@ for line in open(sys.argv[1]):
         echo "==> sha256 OK: ${ACTUAL_SHA}"
         echo "==> Importing bundle into OSTree repo"
         podman image exists "{{container_image}}" || podman pull "{{container_image}}"
+        # Init repo if it doesn't exist — flatpak-builder creates it automatically,
+        # but build-import-bundle requires it to already exist
+        [[ -d ".ostree-repo" ]] || podman run --rm --privileged \
+          -v "$(pwd):/workspace:z" -w /workspace \
+          "{{container_image}}" \
+          ostree init --mode=archive-z2 --repo=.ostree-repo
         # --ref: override the embedded ref name so it matches our standard REF
         podman run --rm --privileged \
           -v "$(pwd):/workspace:z" \
@@ -105,19 +67,11 @@ for line in open(sys.argv[1]):
     elif [[ -f "${MANIFEST}" ]]; then
         # === flatpak-builder path (e.g. ghostty) ===
         echo "==> mode: flatpak-builder (manifest.yaml)"
-        APP_ID=$(python3 -c "
-import sys
-for line in open(sys.argv[1]):
-    line = line.strip()
-    if line.startswith('app-id:'):
-        print(line.split(':', 1)[1].strip())
-        break
-" "${MANIFEST}")
+        APP_ID=$(yq '.app-id' "${MANIFEST}")
         [[ -n "${APP_ID}" ]] || { echo "ERROR: could not determine app-id from ${MANIFEST}" >&2; exit 1; }
         REF="app/${APP_ID}/${ARCH}/stable"
         echo "==> Building ${REF}"
         echo "==> mode: full (ghcr.io push)"
-        # Ensure container image is cached
         podman image exists "{{container_image}}" || podman pull "{{container_image}}"
         # SOURCE_DATE_EPOCH=0: normalises tar timestamps for deterministic OCI blob hashes
         # --override-source-date-epoch=0: makes OSTree commit timestamps deterministic
@@ -150,7 +104,15 @@ for line in open(sys.argv[1]):
       "docker://{{local_registry}}/castrojo/jorgehub/${APP}:latest"
     DIGEST=$(cat "/tmp/${APP}-digest.txt")
     echo "==> Local digest: ${DIGEST}"
-    _verify_labels "docker://{{local_registry}}/castrojo/jorgehub/${APP}@${DIGEST}" "--tls-verify=false"
+    skopeo inspect --tls-verify=false \
+      "docker://{{local_registry}}/castrojo/jorgehub/${APP}@${DIGEST}" \
+      | jq -e '
+        .Labels["org.flatpak.ref"] // error("MISSING: org.flatpak.ref"),
+        .Labels["org.flatpak.metadata"] // error("MISSING: org.flatpak.metadata")
+        | "OK: " + (if type == "string" then "present" else "present" end)
+      ' > /dev/null \
+      && echo "All required labels present." \
+      || { echo "ERROR: required labels missing" >&2; exit 1; }
     # Load OCI into podman image store (--quiet: output image ID only, no progress noise)
     IMAGE_ID=$(podman pull --quiet "oci:./${OCI_DIR}")
     echo "==> Image ID: ${IMAGE_ID}"
@@ -162,15 +124,7 @@ for line in open(sys.argv[1]):
     echo "==> ghcr.io digest: ${GHCR_DIGEST}"
     # Verify zstd:chunked
     skopeo inspect --raw "docker://ghcr.io/castrojo/jorgehub/${APP}:latest-${ARCH}" \
-      | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-for i, l in enumerate(d.get('layers', [])):
-    mt = l.get('mediaType', '')
-    ann = l.get('annotations', {})
-    chunked = 'io.github.containers.zstd-chunked.manifest' in ann
-    print(f'Layer {i}: {mt}  zstd={\"zstd\" in mt}  chunked={chunked}')
-"
+      | jq -r '.layers[] | "Layer: \(.mediaType)  zstd=\(.mediaType | contains("zstd"))  chunked=\(.annotations["io.github.containers.zstd-chunked.manifest"] != null)"'
     echo "==> Done. ghcr.io/castrojo/jorgehub/${APP}:latest-${ARCH} @ ${GHCR_DIGEST}"
 
 # Loop: build + local registry only (no ghcr push) — dev iteration target
@@ -183,55 +137,13 @@ loop app="ghostty":
     ARCH=$(uname -m)
     OCI_DIR=".${APP}.oci"
 
-    _verify_labels() {
-        skopeo inspect --tls-verify=false "$1" \
-          | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-labels = d.get('Labels', {})
-for k in ['org.flatpak.ref', 'org.flatpak.metadata']:
-    s = 'OK' if k in labels else 'MISSING'
-    print(f'{s}: {k}')
-    if s == 'MISSING': sys.exit(1)
-print('All required labels present.')
-"
-    }
-
     if [[ -f "${RELEASE_DESC}" ]]; then
         # === Bundle repack path (e.g. goose) ===
         echo "==> mode: bundle-repack LOCAL_ONLY"
-        APP_ID=$(python3 -c "
-import sys
-for line in open(sys.argv[1]):
-    line = line.strip()
-    if line.startswith('app-id:'):
-        print(line.split(':', 1)[1].strip())
-        break
-" "${RELEASE_DESC}")
-        VERSION=$(python3 -c "
-import sys
-for line in open(sys.argv[1]):
-    line = line.strip()
-    if line.startswith('version:'):
-        print(line.split(':', 1)[1].strip())
-        break
-" "${RELEASE_DESC}")
-        URL=$(python3 -c "
-import sys
-for line in open(sys.argv[1]):
-    line = line.strip()
-    if line.startswith('url:'):
-        print(line.split(':', 1)[1].strip())
-        break
-" "${RELEASE_DESC}")
-        EXPECTED_SHA=$(python3 -c "
-import sys
-for line in open(sys.argv[1]):
-    line = line.strip()
-    if line.startswith('sha256:'):
-        print(line.split(':', 1)[1].strip())
-        break
-" "${RELEASE_DESC}")
+        APP_ID=$(yq '.app-id' "${RELEASE_DESC}")
+        VERSION=$(yq '.version' "${RELEASE_DESC}")
+        URL=$(yq '.url' "${RELEASE_DESC}")
+        EXPECTED_SHA=$(yq '.sha256' "${RELEASE_DESC}")
         [[ -n "${APP_ID}" && -n "${VERSION}" && -n "${URL}" && -n "${EXPECTED_SHA}" ]] \
           || { echo "ERROR: release.yaml missing required fields" >&2; exit 1; }
         REF="app/${APP_ID}/${ARCH}/stable"
@@ -259,6 +171,10 @@ for line in open(sys.argv[1]):
         echo "==> sha256 OK: ${ACTUAL_SHA}"
         echo "==> Importing bundle into OSTree repo"
         podman image exists "{{container_image}}" || podman pull "{{container_image}}"
+        [[ -d ".ostree-repo" ]] || podman run --rm --privileged \
+          -v "$(pwd):/workspace:z" -w /workspace \
+          "{{container_image}}" \
+          ostree init --mode=archive-z2 --repo=.ostree-repo
         podman run --rm --privileged \
           -v "$(pwd):/workspace:z" \
           -v "${BUNDLE_FILE}:${BUNDLE_FILE}:z" \
@@ -276,14 +192,7 @@ for line in open(sys.argv[1]):
     elif [[ -f "${MANIFEST}" ]]; then
         # === flatpak-builder path (e.g. ghostty) ===
         echo "==> mode: flatpak-builder LOCAL_ONLY"
-        APP_ID=$(python3 -c "
-import sys
-for line in open(sys.argv[1]):
-    line = line.strip()
-    if line.startswith('app-id:'):
-        print(line.split(':', 1)[1].strip())
-        break
-" "${MANIFEST}")
+        APP_ID=$(yq '.app-id' "${MANIFEST}")
         [[ -n "${APP_ID}" ]] || { echo "ERROR: could not determine app-id from ${MANIFEST}" >&2; exit 1; }
         REF="app/${APP_ID}/${ARCH}/stable"
         echo "==> Building ${REF}"
@@ -315,7 +224,15 @@ for line in open(sys.argv[1]):
       "docker://{{local_registry}}/castrojo/jorgehub/${APP}:latest"
     DIGEST=$(cat "/tmp/${APP}-digest.txt")
     echo "==> Local digest: ${DIGEST}"
-    _verify_labels "docker://{{local_registry}}/castrojo/jorgehub/${APP}@${DIGEST}"
+    skopeo inspect --tls-verify=false \
+      "docker://{{local_registry}}/castrojo/jorgehub/${APP}@${DIGEST}" \
+      | jq -e '
+        .Labels["org.flatpak.ref"] // error("MISSING: org.flatpak.ref"),
+        .Labels["org.flatpak.metadata"] // error("MISSING: org.flatpak.metadata")
+        | "OK: present"
+      ' > /dev/null \
+      && echo "All required labels present." \
+      || { echo "ERROR: required labels missing" >&2; exit 1; }
     echo "==> LOCAL_ONLY done. ${DIGEST}"
 
 # Update gh-pages index from latest ghcr.io digest and push
