@@ -117,7 +117,7 @@ jobs:
       - name: Export OCI bundle (flatpak-builder path)
         if: steps.detect-path.outputs.mode == 'flatpak-builder'
         run: |
-          APP_ID=$(yq '.app-id' "flatpaks/${{ matrix.app }}/manifest.yaml")
+          APP_ID=$(python3 -c "import yaml,sys; d=yaml.safe_load(open('flatpaks/${{ matrix.app }}/manifest.yaml')); print(d['app-id'])")
           [[ -n "${APP_ID}" && "${APP_ID}" != "null" ]] || { echo "ERROR: could not determine app-id" >&2; exit 1; }
           echo "==> Exporting OCI for ${APP_ID} (arch: ${{ matrix.arch }}, branch: stable)"
           # OSTree repo is at ./repo (action hardcodes localRepoName='repo')
@@ -133,10 +133,10 @@ jobs:
         if: steps.detect-path.outputs.mode == 'bundle-repack'
         run: |
           DESC="flatpaks/${{ matrix.app }}/release.yaml"
-          APP_ID=$(yq '.app-id' "${DESC}")
-          VERSION=$(yq '.version' "${DESC}")
-          URL=$(yq '.url' "${DESC}")
-          EXPECTED_SHA=$(yq '.sha256' "${DESC}")
+          APP_ID=$(python3 -c "import yaml,sys; d=yaml.safe_load(open('${DESC}')); print(d['app-id'])")
+          VERSION=$(python3 -c "import yaml,sys; d=yaml.safe_load(open('${DESC}')); print(d['version'])")
+          URL=$(python3 -c "import yaml,sys; d=yaml.safe_load(open('${DESC}')); print(d['url'])")
+          EXPECTED_SHA=$(python3 -c "import yaml,sys; d=yaml.safe_load(open('${DESC}')); print(d['sha256'])")
           [[ -n "${APP_ID}" && "${APP_ID}" != "null" \
           && -n "${VERSION}" && "${VERSION}" != "null" \
           && -n "${URL}" && "${URL}" != "null" \

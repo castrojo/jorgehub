@@ -39,7 +39,7 @@ jobs:
         run: |
           DESC="flatpaks/${{ inputs.app }}/release.yaml"
           [[ -f "${DESC}" ]] || { echo "ERROR: ${DESC} not found; backfill is for bundle-repack apps only" >&2; exit 1; }
-          APP_ID=$(yq '.app-id' "${DESC}")
+          APP_ID=$(python3 -c "import yaml,sys; d=yaml.safe_load(open('${DESC}')); print(d['app-id'])")
           [[ -n "${APP_ID}" && "${APP_ID}" != "null" ]] || { echo "ERROR: could not read app-id from ${DESC}" >&2; exit 1; }
           echo "APP_ID=${APP_ID}" >> "$GITHUB_ENV"
           BUNDLE_FILE="/tmp/${{ inputs.app }}-${{ inputs.version }}.flatpak"
