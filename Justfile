@@ -324,7 +324,8 @@ loop app="ghostty":
       "docker://{{local_registry}}/castrojo/jorgehub/${APP}@${DIGEST}" \
       | jq -e '
         .Labels["org.flatpak.ref"] // error("MISSING: org.flatpak.ref"),
-        .Labels["org.flatpak.metadata"] // error("MISSING: org.flatpak.metadata")
+        .Labels["org.flatpak.metadata"] // error("MISSING: org.flatpak.metadata"),
+        .Labels["org.opencontainers.image.created"] // error("MISSING: org.opencontainers.image.created")
         | "OK: present"
       ' > /dev/null && echo "All required labels present."
     echo "==> LOCAL_ONLY done. ${DIGEST} — layers: ${LAYER_COUNT}"
