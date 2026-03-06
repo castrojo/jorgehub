@@ -39,15 +39,8 @@ jobs:
         run: |
           DESC="flatpaks/${{ inputs.app }}/release.yaml"
           [[ -f "${DESC}" ]] || { echo "ERROR: ${DESC} not found; backfill is for bundle-repack apps only" >&2; exit 1; }
-          APP_ID=$(python3 -c "
-          import sys
-          for line in open(sys.argv[1]):
-              line = line.strip()
-              if line.startswith('app-id:'):
-                  print(line.split(':', 1)[1].strip())
-                  break
-          " "${DESC}")
-          [[ -n "${APP_ID}" ]] || { echo "ERROR: could not read app-id from ${DESC}" >&2; exit 1; }
+          APP_ID=$(yq '.app-id' "${DESC}")
+          [[ -n "${APP_ID}" && "${APP_ID}" != "null" ]] || { echo "ERROR: could not read app-id from ${DESC}" >&2; exit 1; }
           echo "APP_ID=${APP_ID}" >> "$GITHUB_ENV"
           BUNDLE_FILE="/tmp/${{ inputs.app }}-${{ inputs.version }}.flatpak"
           echo "==> Downloading ${{ inputs.url }}"
@@ -116,27 +109,12 @@ jobs:
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
             "${IMAGE_ID}"
           DESC="flatpaks/${{ inputs.app }}/release.yaml"
-          TITLE=$(python3 -c "
-          import sys, re
-          for line in open(sys.argv[1]):
-              m = re.match(r'^title:\s*(.*)', line.strip())
-              if m: print(m.group(1).strip())
-          " "${DESC}" 2>/dev/null || true)
-          DESCRIPTION=$(python3 -c "
-          import sys, re
-          for line in open(sys.argv[1]):
-              m = re.match(r'^description:\s*(.*)', line.strip())
-              if m: print(m.group(1).strip())
-          " "${DESC}" 2>/dev/null || true)
-          LICENSE=$(python3 -c "
-          import sys, re
-          for line in open(sys.argv[1]):
-              m = re.match(r'^license:\s*(.*)', line.strip())
-              if m: print(m.group(1).strip())
-          " "${DESC}" 2>/dev/null || true)
-          [[ -n "${TITLE}" ]] && buildah config --label "org.opencontainers.image.title=${TITLE}" "${IMAGE_ID}" || true
-          [[ -n "${DESCRIPTION}" ]] && buildah config --label "org.opencontainers.image.description=${DESCRIPTION}" "${IMAGE_ID}" || true
-          [[ -n "${LICENSE}" ]] && buildah config --label "org.opencontainers.image.licenses=${LICENSE}" "${IMAGE_ID}" || true
+          TITLE=$(yq '.title // ""' "${DESC}")
+          DESCRIPTION=$(yq '.description // ""' "${DESC}")
+          LICENSE=$(yq '.license // ""' "${DESC}")
+          [[ -n "${TITLE}" && "${TITLE}" != "null" ]] && buildah config --label "org.opencontainers.image.title=${TITLE}" "${IMAGE_ID}" || true
+          [[ -n "${DESCRIPTION}" && "${DESCRIPTION}" != "null" ]] && buildah config --label "org.opencontainers.image.description=${DESCRIPTION}" "${IMAGE_ID}" || true
+          [[ -n "${LICENSE}" && "${LICENSE}" != "null" ]] && buildah config --label "org.opencontainers.image.licenses=${LICENSE}" "${IMAGE_ID}" || true
           echo "==> OCI labels applied"
           podman pull "${CHUNKAH_IMAGE}"
           export CHUNKAH_CONFIG_STR
