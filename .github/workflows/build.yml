@@ -242,6 +242,40 @@ jobs:
           # --quiet: image ID only, no progress noise
           IMAGE_ID=$(podman pull --quiet "oci:./${APP}.oci")
           echo "==> Single-layer image: ${IMAGE_ID}"
+          # Apply OCI standard labels before chunkah — labels added after CHUNKAH_CONFIG_STR are lost
+          CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          buildah config \
+            --label "org.opencontainers.image.version=${VERSION:-}" \
+            --label "org.opencontainers.image.source=${UPSTREAM_URL:-}" \
+            --label "org.opencontainers.image.created=${CREATED}" \
+            --label "org.opencontainers.image.vendor=castrojo" \
+            --label "org.opencontainers.image.url=https://github.com/castrojo/jorgehub" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            "${IMAGE_ID}"
+          if [[ -n "${VERSION:-}" ]]; then
+            TITLE=$(python3 -c "
+          import sys, re
+          for line in open(sys.argv[1]):
+              m = re.match(r'^title:\s*(.*)', line.strip())
+              if m: print(m.group(1).strip())
+          " "flatpaks/${{ matrix.app }}/release.yaml" 2>/dev/null || true)
+            DESCRIPTION=$(python3 -c "
+          import sys, re
+          for line in open(sys.argv[1]):
+              m = re.match(r'^description:\s*(.*)', line.strip())
+              if m: print(m.group(1).strip())
+          " "flatpaks/${{ matrix.app }}/release.yaml" 2>/dev/null || true)
+            LICENSE=$(python3 -c "
+          import sys, re
+          for line in open(sys.argv[1]):
+              m = re.match(r'^license:\s*(.*)', line.strip())
+              if m: print(m.group(1).strip())
+          " "flatpaks/${{ matrix.app }}/release.yaml" 2>/dev/null || true)
+            [[ -n "${TITLE}" ]] && buildah config --label "org.opencontainers.image.title=${TITLE}" "${IMAGE_ID}" || true
+            [[ -n "${DESCRIPTION}" ]] && buildah config --label "org.opencontainers.image.description=${DESCRIPTION}" "${IMAGE_ID}" || true
+            [[ -n "${LICENSE}" ]] && buildah config --label "org.opencontainers.image.licenses=${LICENSE}" "${IMAGE_ID}" || true
+          fi
+          echo "==> OCI labels applied"
           podman pull "${CHUNKAH_IMAGE}"
           # Preserve image config (labels etc.) across chunkah round-trip
           export CHUNKAH_CONFIG_STR
@@ -298,7 +332,7 @@ jobs:
           import json, sys
           d = json.load(sys.stdin)
           labels = d.get('Labels', {})
-          for k in ['org.flatpak.ref', 'org.flatpak.metadata']:
+          for k in ['org.flatpak.ref', 'org.flatpak.metadata', 'org.opencontainers.image.created']:
               s = 'OK' if k in labels else 'MISSING'
               print(f'{s}: {k}')
               if s == 'MISSING': sys.exit(1)

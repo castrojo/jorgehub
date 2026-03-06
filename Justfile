@@ -100,6 +100,24 @@ build app="ghostty":
     # === Common: load into podman, run chunkah, verify, push ===
     IMAGE_ID=$(podman pull --quiet "oci:./${OCI_DIR}")
     echo "==> Single-layer image: ${IMAGE_ID}"
+    # Apply OCI standard labels before chunkah — labels added after CHUNKAH_CONFIG_STR is captured are lost
+    CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    buildah config \
+      --label "org.opencontainers.image.version=${VERSION:-}" \
+      --label "org.opencontainers.image.source=${URL:-}" \
+      --label "org.opencontainers.image.created=${CREATED}" \
+      --label "org.opencontainers.image.vendor=castrojo" \
+      --label "org.opencontainers.image.url=https://github.com/castrojo/jorgehub" \
+      "${IMAGE_ID}"
+    if [[ -n "${VERSION:-}" && -f "${RELEASE_DESC}" ]]; then
+        TITLE=$(yq '.title // ""' "${RELEASE_DESC}")
+        DESCRIPTION=$(yq '.description // ""' "${RELEASE_DESC}")
+        LICENSE=$(yq '.license // ""' "${RELEASE_DESC}")
+        [[ -n "${TITLE}" ]] && buildah config --label "org.opencontainers.image.title=${TITLE}" "${IMAGE_ID}"
+        [[ -n "${DESCRIPTION}" ]] && buildah config --label "org.opencontainers.image.description=${DESCRIPTION}" "${IMAGE_ID}"
+        [[ -n "${LICENSE}" ]] && buildah config --label "org.opencontainers.image.licenses=${LICENSE}" "${IMAGE_ID}"
+    fi
+    echo "==> OCI labels applied"
     echo "==> Running chunkah to split into content-based layers"
     podman image exists "quay.io/jlebon/chunkah:v0.2.0" || podman pull "quay.io/jlebon/chunkah:v0.2.0"
     export CHUNKAH_CONFIG_STR
@@ -129,8 +147,9 @@ build app="ghostty":
       "docker://localhost:5000/castrojo/jorgehub/${APP}@${LOCAL_DIGEST}" \
       | jq -e '
         .Labels["org.flatpak.ref"] // error("MISSING: org.flatpak.ref"),
-        .Labels["org.flatpak.metadata"] // error("MISSING: org.flatpak.metadata")
-        | "OK: " + (if type == "string" then "present" else "present" end)
+        .Labels["org.flatpak.metadata"] // error("MISSING: org.flatpak.metadata"),
+        .Labels["org.opencontainers.image.created"] // error("MISSING: org.opencontainers.image.created")
+        | "OK: present"
       ' > /dev/null \
       && echo "All required labels present."
     # Push to ghcr.io with zstd:chunked
@@ -246,6 +265,25 @@ loop app="ghostty":
     # 1. Load OCI dir into podman image store
     IMAGE_ID=$(podman pull --quiet "oci:./${OCI_DIR}")
     echo "==> Loaded image: ${IMAGE_ID}"
+
+    # 1b. Apply OCI standard labels before chunkah — labels added after CHUNKAH_CONFIG_STR are lost
+    CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    buildah config \
+      --label "org.opencontainers.image.version=${VERSION:-}" \
+      --label "org.opencontainers.image.source=${URL:-}" \
+      --label "org.opencontainers.image.created=${CREATED}" \
+      --label "org.opencontainers.image.vendor=castrojo" \
+      --label "org.opencontainers.image.url=https://github.com/castrojo/jorgehub" \
+      "${IMAGE_ID}"
+    if [[ -n "${VERSION:-}" && -f "${RELEASE_DESC}" ]]; then
+        TITLE=$(yq '.title // ""' "${RELEASE_DESC}")
+        DESCRIPTION=$(yq '.description // ""' "${RELEASE_DESC}")
+        LICENSE=$(yq '.license // ""' "${RELEASE_DESC}")
+        [[ -n "${TITLE}" ]] && buildah config --label "org.opencontainers.image.title=${TITLE}" "${IMAGE_ID}"
+        [[ -n "${DESCRIPTION}" ]] && buildah config --label "org.opencontainers.image.description=${DESCRIPTION}" "${IMAGE_ID}"
+        [[ -n "${LICENSE}" ]] && buildah config --label "org.opencontainers.image.licenses=${LICENSE}" "${IMAGE_ID}"
+    fi
+    echo "==> OCI labels applied"
 
     # 2. Ensure chunkah image is cached
     podman image exists "quay.io/jlebon/chunkah:v0.2.0" || podman pull "quay.io/jlebon/chunkah:v0.2.0"
