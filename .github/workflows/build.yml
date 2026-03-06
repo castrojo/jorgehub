@@ -176,6 +176,7 @@ jobs:
             || { echo "ERROR: release.yaml missing required fields" >&2; exit 1; }
           echo "APP_ID=${APP_ID}" >> "$GITHUB_ENV"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "UPSTREAM_URL=${URL}" >> "$GITHUB_ENV"
           BUNDLE_FILE="/tmp/${{ matrix.app }}-${VERSION}.flatpak"
           echo "BUNDLE_FILE=${BUNDLE_FILE}" >> "$GITHUB_ENV"
           echo "==> Downloading ${URL}"
