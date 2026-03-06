@@ -317,6 +317,18 @@ jobs:
             "${CHUNKED_ID}" "docker://${TARGET}"
           DIGEST=$(cat /tmp/digest.txt)
           echo "==> Pushed ${TARGET} @ ${DIGEST} — layers: ${LAYER_COUNT}"
+          # Version and stable tags — only for bundle-repack apps (VERSION set in GITHUB_ENV)
+          if [[ -n "${VERSION:-}" ]]; then
+            echo "${{ secrets.GITHUB_TOKEN }}" | \
+              skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+            skopeo copy \
+              "containers-storage:${CHUNKED_ID}" \
+              "docker://ghcr.io/${{ github.repository_owner }}/${{ matrix.app }}:${VERSION}-${{ matrix.arch }}"
+            skopeo copy \
+              "containers-storage:${CHUNKED_ID}" \
+              "docker://ghcr.io/${{ github.repository_owner }}/${{ matrix.app }}:stable-${{ matrix.arch }}"
+            echo "==> Tags: latest-${{ matrix.arch }}, ${VERSION}-${{ matrix.arch }}, stable-${{ matrix.arch }}"
+          fi
 
       - name: Login to ghcr.io for skopeo inspect
         run: |
