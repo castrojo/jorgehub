@@ -7,6 +7,39 @@ default:
 container_image := "ghcr.io/flathub-infra/flatpak-github-actions:gnome-49"
 local_registry := "localhost:5000"
 
+# === Private helpers ===
+
+# Apply OCI standard labels to an image before chunkah processing.
+# Arguments: image-id version url release-desc
+# version and url may be empty (flatpak-builder path); release-desc may be absent.
+_apply-oci-labels image-id version="" url="" release-desc="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    IMAGE_ID="{{image-id}}"
+    VERSION="{{version}}"
+    URL="{{url}}"
+    RELEASE_DESC="{{release-desc}}"
+    CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    GH_OWNER="${GITHUB_REPOSITORY_OWNER:-castrojo}"
+    buildah config \
+      --label "org.opencontainers.image.version=${VERSION}" \
+      --label "org.opencontainers.image.source=${URL}" \
+      --label "org.opencontainers.image.created=${CREATED}" \
+      --label "org.opencontainers.image.vendor=${GH_OWNER}" \
+      --label "org.opencontainers.image.url=https://github.com/${GH_OWNER}/jorgehub" \
+      "${IMAGE_ID}"
+    if [[ -n "${VERSION}" && -f "${RELEASE_DESC}" ]]; then
+        TITLE=$(yq '.title // ""' "${RELEASE_DESC}")
+        DESCRIPTION=$(yq '.description // ""' "${RELEASE_DESC}")
+        LICENSE=$(yq '.license // ""' "${RELEASE_DESC}")
+        labels=()
+        [[ -n "${TITLE}" ]]       && labels+=(--label "org.opencontainers.image.title=${TITLE}")
+        [[ -n "${DESCRIPTION}" ]] && labels+=(--label "org.opencontainers.image.description=${DESCRIPTION}")
+        [[ -n "${LICENSE}" ]]     && labels+=(--label "org.opencontainers.image.licenses=${LICENSE}")
+        (( ${#labels[@]} > 0 )) && buildah config "${labels[@]}" "${IMAGE_ID}"
+    fi
+    echo "==> OCI labels applied"
+
 # === Build recipes ===
 
 # Build app and push to ghcr.io with zstd:chunked compression
@@ -101,23 +134,7 @@ build app="ghostty":
     IMAGE_ID=$(podman pull --quiet "oci:./${OCI_DIR}")
     echo "==> Single-layer image: ${IMAGE_ID}"
     # Apply OCI standard labels before chunkah — labels added after CHUNKAH_CONFIG_STR is captured are lost
-    CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    buildah config \
-      --label "org.opencontainers.image.version=${VERSION:-}" \
-      --label "org.opencontainers.image.source=${URL:-}" \
-      --label "org.opencontainers.image.created=${CREATED}" \
-      --label "org.opencontainers.image.vendor=castrojo" \
-      --label "org.opencontainers.image.url=https://github.com/castrojo/jorgehub" \
-      "${IMAGE_ID}"
-    if [[ -n "${VERSION:-}" && -f "${RELEASE_DESC}" ]]; then
-        TITLE=$(yq '.title // ""' "${RELEASE_DESC}")
-        DESCRIPTION=$(yq '.description // ""' "${RELEASE_DESC}")
-        LICENSE=$(yq '.license // ""' "${RELEASE_DESC}")
-        [[ -n "${TITLE}" ]] && buildah config --label "org.opencontainers.image.title=${TITLE}" "${IMAGE_ID}"
-        [[ -n "${DESCRIPTION}" ]] && buildah config --label "org.opencontainers.image.description=${DESCRIPTION}" "${IMAGE_ID}"
-        [[ -n "${LICENSE}" ]] && buildah config --label "org.opencontainers.image.licenses=${LICENSE}" "${IMAGE_ID}"
-    fi
-    echo "==> OCI labels applied"
+    just _apply-oci-labels "${IMAGE_ID}" "${VERSION:-}" "${URL:-}" "${RELEASE_DESC}"
     echo "==> Running chunkah to split into content-based layers"
     podman image exists "quay.io/jlebon/chunkah:v0.2.0" || podman pull "quay.io/jlebon/chunkah:v0.2.0"
     export CHUNKAH_CONFIG_STR
@@ -153,26 +170,27 @@ build app="ghostty":
       ' > /dev/null \
       && echo "All required labels present."
     # Push to ghcr.io with zstd:chunked
-    gh auth token | podman login ghcr.io --username castrojo --password-stdin
+    GH_OWNER="${GITHUB_REPOSITORY_OWNER:-castrojo}"
+    gh auth token | podman login ghcr.io --username "${GH_OWNER}" --password-stdin
     podman push --compression-format=zstd:chunked \
       --digestfile "/tmp/${APP}-ghcr-digest.txt" \
-      "${CHUNKED_ID}" "docker://ghcr.io/castrojo/${APP}:latest-${ARCH}"
+      "${CHUNKED_ID}" "docker://ghcr.io/${GH_OWNER}/${APP}:latest-${ARCH}"
     GHCR_DIGEST=$(cat "/tmp/${APP}-ghcr-digest.txt")
     echo "==> ghcr.io digest: ${GHCR_DIGEST}"
     # Version and stable tags (bundle-repack path only — VERSION not set for flatpak-builder)
     if [[ -n "${VERSION:-}" ]]; then
         echo "==> Pushing version tag: ${VERSION}-${ARCH}"
-        skopeo copy --compression-format=zstd:chunked --dest-creds "castrojo:$(gh auth token)" \
+        skopeo copy --compression-format=zstd:chunked --dest-creds "${GH_OWNER}:$(gh auth token)" \
           "containers-storage:${CHUNKED_ID}" \
-          "docker://ghcr.io/castrojo/${APP}:${VERSION}-${ARCH}"
+          "docker://ghcr.io/${GH_OWNER}/${APP}:${VERSION}-${ARCH}"
         echo "==> Pushing stable tag"
-        skopeo copy --compression-format=zstd:chunked --dest-creds "castrojo:$(gh auth token)" \
+        skopeo copy --compression-format=zstd:chunked --dest-creds "${GH_OWNER}:$(gh auth token)" \
           "containers-storage:${CHUNKED_ID}" \
-          "docker://ghcr.io/castrojo/${APP}:stable-${ARCH}"
+          "docker://ghcr.io/${GH_OWNER}/${APP}:stable-${ARCH}"
         echo "==> Tags pushed: latest-${ARCH}, ${VERSION}-${ARCH}, stable-${ARCH}"
     fi
     # Verify ALL layers are zstd:chunked — fail if any are not
-    LAYER_RESULTS=$(skopeo inspect --raw "docker://ghcr.io/castrojo/${APP}:latest-${ARCH}" \
+    LAYER_RESULTS=$(skopeo inspect --raw "docker://ghcr.io/${GH_OWNER}/${APP}:latest-${ARCH}" \
       | jq -r '.layers[] | "Layer \(.digest[:19]): mediaType=\(.mediaType) chunked=\((.annotations // {}) | has("io.github.containers.zstd-chunked.manifest-checksum"))"')
     echo "${LAYER_RESULTS}"
     if echo "${LAYER_RESULTS}" | grep -q "chunked=false"; then
@@ -180,7 +198,7 @@ build app="ghostty":
       exit 1
     fi
     echo "==> All ${LAYER_COUNT} layers are zstd:chunked"
-    echo "==> Done. ghcr.io/castrojo/${APP}:latest-${ARCH} @ ${GHCR_DIGEST}"
+    echo "==> Done. ghcr.io/${GH_OWNER}/${APP}:latest-${ARCH} @ ${GHCR_DIGEST}"
 
 # Loop: build + local registry only (no ghcr push) — dev iteration target
 loop app="ghostty":
@@ -279,23 +297,7 @@ loop app="ghostty":
     echo "==> Loaded image: ${IMAGE_ID}"
 
     # 1b. Apply OCI standard labels before chunkah — labels added after CHUNKAH_CONFIG_STR are lost
-    CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    buildah config \
-      --label "org.opencontainers.image.version=${VERSION:-}" \
-      --label "org.opencontainers.image.source=${URL:-}" \
-      --label "org.opencontainers.image.created=${CREATED}" \
-      --label "org.opencontainers.image.vendor=castrojo" \
-      --label "org.opencontainers.image.url=https://github.com/castrojo/jorgehub" \
-      "${IMAGE_ID}"
-    if [[ -n "${VERSION:-}" && -f "${RELEASE_DESC}" ]]; then
-        TITLE=$(yq '.title // ""' "${RELEASE_DESC}")
-        DESCRIPTION=$(yq '.description // ""' "${RELEASE_DESC}")
-        LICENSE=$(yq '.license // ""' "${RELEASE_DESC}")
-        [[ -n "${TITLE}" ]] && buildah config --label "org.opencontainers.image.title=${TITLE}" "${IMAGE_ID}"
-        [[ -n "${DESCRIPTION}" ]] && buildah config --label "org.opencontainers.image.description=${DESCRIPTION}" "${IMAGE_ID}"
-        [[ -n "${LICENSE}" ]] && buildah config --label "org.opencontainers.image.licenses=${LICENSE}" "${IMAGE_ID}"
-    fi
-    echo "==> OCI labels applied"
+    just _apply-oci-labels "${IMAGE_ID}" "${VERSION:-}" "${URL:-}" "${RELEASE_DESC}"
 
     # 2. Ensure chunkah image is cached
     podman image exists "quay.io/jlebon/chunkah:v0.2.0" || podman pull "quay.io/jlebon/chunkah:v0.2.0"
