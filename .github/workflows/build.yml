@@ -228,6 +228,37 @@ jobs:
         with:
           extra-squeeze: "true"
 
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Read release metadata (bundle-repack apps only)
+        run: |
+          # GITHUB_ENV is job-scoped — VERSION/UPSTREAM_URL written by the build job are not
+          # available here. Re-derive them from release.yaml if this is a bundle-repack app.
+          DESC="flatpaks/${{ matrix.app }}/release.yaml"
+          if [[ -f "${DESC}" ]]; then
+            VERSION=$(python3 -c "
+          import sys
+          for line in open(sys.argv[1]):
+              line = line.strip()
+              if line.startswith('version:'):
+                  print(line.split(':', 1)[1].strip())
+                  break
+          " "${DESC}")
+            URL=$(python3 -c "
+          import sys
+          for line in open(sys.argv[1]):
+              line = line.strip()
+              if line.startswith('url:'):
+                  print(line.split(':', 1)[1].strip())
+                  break
+          " "${DESC}")
+            echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+            echo "UPSTREAM_URL=${URL}" >> "$GITHUB_ENV"
+            echo "==> Bundle-repack: VERSION=${VERSION}"
+          else
+            echo "==> Flatpak-builder app — VERSION/UPSTREAM_URL not set"
+          fi
+
       - name: Download OCI artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -310,7 +341,7 @@ jobs:
           TAG="latest-${{ matrix.arch }}"
           TARGET="ghcr.io/${{ github.repository_owner }}/${{ matrix.app }}:${TAG}"
           echo "${{ secrets.GITHUB_TOKEN }}" | \
-            podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+            podman login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
           podman push \
             --compression-format=zstd:chunked \
             --digestfile /tmp/digest.txt \
@@ -322,9 +353,11 @@ jobs:
             echo "${{ secrets.GITHUB_TOKEN }}" | \
               skopeo login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
             skopeo copy \
+              --compression-format=zstd:chunked \
               "containers-storage:${CHUNKED_ID}" \
               "docker://ghcr.io/${{ github.repository_owner }}/${{ matrix.app }}:${VERSION}-${{ matrix.arch }}"
             skopeo copy \
+              --compression-format=zstd:chunked \
               "containers-storage:${CHUNKED_ID}" \
               "docker://ghcr.io/${{ github.repository_owner }}/${{ matrix.app }}:stable-${{ matrix.arch }}"
             echo "==> Tags: latest-${{ matrix.arch }}, ${VERSION}-${{ matrix.arch }}, stable-${{ matrix.arch }}"
@@ -334,7 +367,7 @@ jobs:
         run: |
           # skopeo does not inherit podman's login session — explicit login required
           echo "${{ secrets.GITHUB_TOKEN }}" | \
-            skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+            skopeo login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
 
       - name: Verify labels on ghcr.io
         run: |
