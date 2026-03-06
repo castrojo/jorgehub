@@ -162,11 +162,11 @@ build app="ghostty":
     # Version and stable tags (bundle-repack path only — VERSION not set for flatpak-builder)
     if [[ -n "${VERSION:-}" ]]; then
         echo "==> Pushing version tag: ${VERSION}-${ARCH}"
-        skopeo copy --dest-creds "castrojo:$(gh auth token)" \
+        skopeo copy --compression-format=zstd:chunked --dest-creds "castrojo:$(gh auth token)" \
           "containers-storage:${CHUNKED_ID}" \
           "docker://ghcr.io/castrojo/${APP}:${VERSION}-${ARCH}"
         echo "==> Pushing stable tag"
-        skopeo copy --dest-creds "castrojo:$(gh auth token)" \
+        skopeo copy --compression-format=zstd:chunked --dest-creds "castrojo:$(gh auth token)" \
           "containers-storage:${CHUNKED_ID}" \
           "docker://ghcr.io/castrojo/${APP}:stable-${ARCH}"
         echo "==> Tags pushed: latest-${ARCH}, ${VERSION}-${ARCH}, stable-${ARCH}"
