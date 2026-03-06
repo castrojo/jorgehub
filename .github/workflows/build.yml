@@ -223,13 +223,19 @@ jobs:
       - name: Split layers with chunkah
         env:
           APP: ${{ matrix.app }}
-          CHUNKAH_IMAGE: quay.io/jlebon/chunkah:v0.2.0
+          CHUNKAH_SPLITTER: https://github.com/coreos/chunkah/releases/download/v0.2.0/Containerfile.splitter
         run: |
-          # Load single-layer OCI into podman image store
-          # --quiet: image ID only, no progress noise
+          INPUT="localhost/${APP}:input"
+          CHUNKED="localhost/${APP}:chunked"
+
+          # Pull OCI dir into podman/buildah shared store; tag for stable reference.
+          # podman pull returns a bare digest ID — buildah config can't find it by
+          # digest alone; tagging gives both tools a stable name in the shared store.
           IMAGE_ID=$(podman pull --quiet "oci:./${APP}.oci")
-          echo "==> Single-layer image: ${IMAGE_ID}"
-          # Apply OCI standard labels before chunkah — labels added after CHUNKAH_CONFIG_STR are lost
+          podman tag "${IMAGE_ID}" "${INPUT}"
+
+          # Apply OCI standard labels before capturing CHUNKAH_CONFIG_STR — labels
+          # added after the capture are not reflected in the chunkah output image.
           CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           buildah config \
             --label "org.opencontainers.image.version=${VERSION:-}" \
@@ -238,41 +244,47 @@ jobs:
             --label "org.opencontainers.image.vendor=castrojo" \
             --label "org.opencontainers.image.url=https://github.com/castrojo/jorgehub" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
-            "${IMAGE_ID}"
+            "${INPUT}"
           if [[ -n "${VERSION:-}" ]]; then
             TITLE=$(yq '.title // ""' "flatpaks/${{ matrix.app }}/release.yaml")
             DESCRIPTION=$(yq '.description // ""' "flatpaks/${{ matrix.app }}/release.yaml")
             LICENSE=$(yq '.license // ""' "flatpaks/${{ matrix.app }}/release.yaml")
-            [[ -n "${TITLE}" && "${TITLE}" != "null" ]] && buildah config --label "org.opencontainers.image.title=${TITLE}" "${IMAGE_ID}" || true
-            [[ -n "${DESCRIPTION}" && "${DESCRIPTION}" != "null" ]] && buildah config --label "org.opencontainers.image.description=${DESCRIPTION}" "${IMAGE_ID}" || true
-            [[ -n "${LICENSE}" && "${LICENSE}" != "null" ]] && buildah config --label "org.opencontainers.image.licenses=${LICENSE}" "${IMAGE_ID}" || true
+            [[ -n "${TITLE}" && "${TITLE}" != "null" ]] && buildah config --label "org.opencontainers.image.title=${TITLE}" "${INPUT}" || true
+            [[ -n "${DESCRIPTION}" && "${DESCRIPTION}" != "null" ]] && buildah config --label "org.opencontainers.image.description=${DESCRIPTION}" "${INPUT}" || true
+            [[ -n "${LICENSE}" && "${LICENSE}" != "null" ]] && buildah config --label "org.opencontainers.image.licenses=${LICENSE}" "${INPUT}" || true
           fi
           echo "==> OCI labels applied"
-          podman pull "${CHUNKAH_IMAGE}"
-          # Preserve image config (labels etc.) across chunkah round-trip
+
+          # podman inspect produces the array format chunkah's parse_config accepts
           export CHUNKAH_CONFIG_STR
-          CHUNKAH_CONFIG_STR=$(podman inspect "${IMAGE_ID}" | jq -c '.[0]')
-          echo "==> Running chunkah to split into content-based layers"
-          podman run --rm \
-            --mount=type=image,src="${IMAGE_ID}",dest=/chunkah \
-            -e CHUNKAH_CONFIG_STR \
-            "${CHUNKAH_IMAGE}" build \
-            > /tmp/${APP}-chunked.ociarchive
-          CHUNKED_ID=$(podman load < /tmp/${APP}-chunked.ociarchive \
-            | grep 'Loaded image:' | grep -oP '(?<=sha256:)[a-f0-9]+')
-          echo "==> Chunked image: ${CHUNKED_ID}"
+          CHUNKAH_CONFIG_STR=$(podman inspect "${INPUT}" | jq -c '.[0]')
+
+          # buildah build --from replaces podman run --mount=type=image (requires
+          # capabilities unavailable on non-privileged ubuntu-24.04 runner).
+          # buildah < v1.44 requires -v and --security-opt for the bind mount in
+          # Containerfile.splitter to work correctly.
+          echo "==> Running chunkah via buildah build"
+          buildah build \
+            --skip-unused-stages=false \
+            --from "${INPUT}" \
+            -t "${CHUNKED}" \
+            -v "$(pwd):/run/src" \
+            --security-opt=label=disable \
+            --build-arg CHUNKAH_CONFIG_STR \
+            "${CHUNKAH_SPLITTER}"
+
           # Verify labels survived the round-trip
-          podman inspect "${CHUNKED_ID}" \
+          podman inspect "${CHUNKED}" \
             | jq -e '.[0].Config.Labels["org.flatpak.ref"] // error("MISSING: org.flatpak.ref")' \
             > /dev/null
           echo "==> Flatpak labels OK"
-          LAYER_COUNT=$(podman inspect "${CHUNKED_ID}" | jq '.[0].RootFS.Layers | length')
+          LAYER_COUNT=$(podman inspect "${CHUNKED}" | jq '.[0].RootFS.Layers | length')
           echo "==> Layer count: ${LAYER_COUNT}"
           [[ "${LAYER_COUNT}" -gt 1 ]] \
             && echo "==> chunkah split succeeded" \
             || echo "==> WARNING: chunkah produced only 1 layer"
           # Export for use in subsequent steps
-          echo "CHUNKED_ID=${CHUNKED_ID}" >> "$GITHUB_ENV"
+          echo "CHUNKED=${CHUNKED}" >> "$GITHUB_ENV"
           echo "LAYER_COUNT=${LAYER_COUNT}" >> "$GITHUB_ENV"
 
       - name: Push to ghcr.io with zstd:chunked
@@ -285,7 +297,7 @@ jobs:
           podman push \
             --compression-format=zstd:chunked \
             --digestfile /tmp/digest.txt \
-            "${CHUNKED_ID}" "docker://${TARGET}"
+            "${CHUNKED}" "docker://${TARGET}"
           DIGEST=$(cat /tmp/digest.txt)
           echo "==> Pushed ${TARGET} @ ${DIGEST} — layers: ${LAYER_COUNT}"
           # Version and stable tags — only for bundle-repack apps (VERSION set in GITHUB_ENV)
@@ -294,11 +306,11 @@ jobs:
               skopeo login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
             skopeo copy \
               --compression-format=zstd:chunked \
-              "containers-storage:${CHUNKED_ID}" \
+              "containers-storage:${CHUNKED}" \
               "docker://ghcr.io/${{ github.repository_owner }}/${{ matrix.app }}:${VERSION}-${{ matrix.arch }}"
             skopeo copy \
               --compression-format=zstd:chunked \
-              "containers-storage:${CHUNKED_ID}" \
+              "containers-storage:${CHUNKED}" \
               "docker://ghcr.io/${{ github.repository_owner }}/${{ matrix.app }}:stable-${{ matrix.arch }}"
             echo "==> Tags: latest-${{ matrix.arch }}, ${VERSION}-${{ matrix.arch }}, stable-${{ matrix.arch }}"
           fi

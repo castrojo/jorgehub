@@ -96,10 +96,20 @@ jobs:
 
       - name: Split layers with chunkah and apply OCI labels
         env:
-          CHUNKAH_IMAGE: quay.io/jlebon/chunkah:v0.2.0
+          CHUNKAH_SPLITTER: https://github.com/coreos/chunkah/releases/download/v0.2.0/Containerfile.splitter
         run: |
-          IMAGE_ID=$(podman pull --quiet "oci:./${{ inputs.app }}.oci")
-          echo "==> Single-layer image: ${IMAGE_ID}"
+          APP="${{ inputs.app }}"
+          INPUT="localhost/${APP}:input"
+          CHUNKED="localhost/${APP}:chunked"
+
+          # Pull OCI dir into podman/buildah shared store; tag for stable reference.
+          # podman pull returns a bare digest ID — buildah config can't find it by
+          # digest alone; tagging gives both tools a stable name in the shared store.
+          IMAGE_ID=$(podman pull --quiet "oci:./${APP}.oci")
+          podman tag "${IMAGE_ID}" "${INPUT}"
+
+          # Apply OCI standard labels before capturing CHUNKAH_CONFIG_STR — labels
+          # added after the capture are not reflected in the chunkah output image.
           CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           buildah config \
             --label "org.opencontainers.image.version=${{ inputs.version }}" \
@@ -108,33 +118,40 @@ jobs:
             --label "org.opencontainers.image.vendor=castrojo" \
             --label "org.opencontainers.image.url=https://github.com/castrojo/jorgehub" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
-            "${IMAGE_ID}"
-          DESC="flatpaks/${{ inputs.app }}/release.yaml"
+            "${INPUT}"
+          DESC="flatpaks/${APP}/release.yaml"
           TITLE=$(yq '.title // ""' "${DESC}")
           DESCRIPTION=$(yq '.description // ""' "${DESC}")
           LICENSE=$(yq '.license // ""' "${DESC}")
-          [[ -n "${TITLE}" && "${TITLE}" != "null" ]] && buildah config --label "org.opencontainers.image.title=${TITLE}" "${IMAGE_ID}" || true
-          [[ -n "${DESCRIPTION}" && "${DESCRIPTION}" != "null" ]] && buildah config --label "org.opencontainers.image.description=${DESCRIPTION}" "${IMAGE_ID}" || true
-          [[ -n "${LICENSE}" && "${LICENSE}" != "null" ]] && buildah config --label "org.opencontainers.image.licenses=${LICENSE}" "${IMAGE_ID}" || true
+          [[ -n "${TITLE}" && "${TITLE}" != "null" ]] && buildah config --label "org.opencontainers.image.title=${TITLE}" "${INPUT}" || true
+          [[ -n "${DESCRIPTION}" && "${DESCRIPTION}" != "null" ]] && buildah config --label "org.opencontainers.image.description=${DESCRIPTION}" "${INPUT}" || true
+          [[ -n "${LICENSE}" && "${LICENSE}" != "null" ]] && buildah config --label "org.opencontainers.image.licenses=${LICENSE}" "${INPUT}" || true
           echo "==> OCI labels applied"
-          podman pull "${CHUNKAH_IMAGE}"
+
+          # podman inspect produces the array format chunkah's parse_config accepts
           export CHUNKAH_CONFIG_STR
-          CHUNKAH_CONFIG_STR=$(podman inspect "${IMAGE_ID}" | jq -c '.[0]')
-          echo "==> Running chunkah"
-          podman run --rm \
-            --mount=type=image,src="${IMAGE_ID}",dest=/chunkah \
-            -e CHUNKAH_CONFIG_STR \
-            "${CHUNKAH_IMAGE}" build \
-            > /tmp/${{ inputs.app }}-chunked.ociarchive
-          CHUNKED_ID=$(podman load < /tmp/${{ inputs.app }}-chunked.ociarchive \
-            | grep 'Loaded image:' | grep -oP '(?<=sha256:)[a-f0-9]+')
-          echo "==> Chunked image: ${CHUNKED_ID}"
-          podman inspect "${CHUNKED_ID}" \
+          CHUNKAH_CONFIG_STR=$(podman inspect "${INPUT}" | jq -c '.[0]')
+
+          # buildah build --from replaces podman run --mount=type=image (requires
+          # capabilities unavailable on non-privileged ubuntu-24.04 runner).
+          # buildah < v1.44 requires -v and --security-opt for the bind mount in
+          # Containerfile.splitter to work correctly.
+          echo "==> Running chunkah via buildah build"
+          buildah build \
+            --skip-unused-stages=false \
+            --from "${INPUT}" \
+            -t "${CHUNKED}" \
+            -v "$(pwd):/run/src" \
+            --security-opt=label=disable \
+            --build-arg CHUNKAH_CONFIG_STR \
+            "${CHUNKAH_SPLITTER}"
+
+          podman inspect "${CHUNKED}" \
             | jq -e '.[0].Config.Labels["org.flatpak.ref"] // error("MISSING: org.flatpak.ref")' \
             > /dev/null && echo "==> Flatpak labels OK"
-          LAYER_COUNT=$(podman inspect "${CHUNKED_ID}" | jq '.[0].RootFS.Layers | length')
+          LAYER_COUNT=$(podman inspect "${CHUNKED}" | jq '.[0].RootFS.Layers | length')
           echo "==> Layer count: ${LAYER_COUNT}"
-          echo "CHUNKED_ID=${CHUNKED_ID}" >> "$GITHUB_ENV"
+          echo "CHUNKED=${CHUNKED}" >> "$GITHUB_ENV"
           echo "LAYER_COUNT=${LAYER_COUNT}" >> "$GITHUB_ENV"
 
       - name: Push version tag to ghcr.io
@@ -146,7 +163,7 @@ jobs:
           podman push \
             --compression-format=zstd:chunked \
             --digestfile /tmp/digest.txt \
-            "${CHUNKED_ID}" "docker://${TARGET}"
+            "${CHUNKED}" "docker://${TARGET}"
           DIGEST=$(cat /tmp/digest.txt)
           echo "==> Pushed ${TARGET} @ ${DIGEST} — layers: ${LAYER_COUNT}"
 
