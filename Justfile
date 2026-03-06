@@ -159,6 +159,18 @@ build app="ghostty":
       "${CHUNKED_ID}" "docker://ghcr.io/castrojo/${APP}:latest-${ARCH}"
     GHCR_DIGEST=$(cat "/tmp/${APP}-ghcr-digest.txt")
     echo "==> ghcr.io digest: ${GHCR_DIGEST}"
+    # Version and stable tags (bundle-repack path only — VERSION not set for flatpak-builder)
+    if [[ -n "${VERSION:-}" ]]; then
+        echo "==> Pushing version tag: ${VERSION}-${ARCH}"
+        skopeo copy --dest-creds "castrojo:$(gh auth token)" \
+          "containers-storage:${CHUNKED_ID}" \
+          "docker://ghcr.io/castrojo/${APP}:${VERSION}-${ARCH}"
+        echo "==> Pushing stable tag"
+        skopeo copy --dest-creds "castrojo:$(gh auth token)" \
+          "containers-storage:${CHUNKED_ID}" \
+          "docker://ghcr.io/castrojo/${APP}:stable-${ARCH}"
+        echo "==> Tags pushed: latest-${ARCH}, ${VERSION}-${ARCH}, stable-${ARCH}"
+    fi
     # Verify ALL layers are zstd:chunked — fail if any are not
     LAYER_RESULTS=$(skopeo inspect --raw "docker://ghcr.io/castrojo/${APP}:latest-${ARCH}" \
       | jq -r '.layers[] | "Layer \(.digest[:19]): mediaType=\(.mediaType) chunked=\((.annotations // {}) | has("io.github.containers.zstd-chunked.manifest-checksum"))"')
