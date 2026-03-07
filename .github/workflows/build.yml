@@ -314,18 +314,26 @@ jobs:
             echo "==> Tags: latest-${{ matrix.arch }}, ${VERSION}-${{ matrix.arch }}"
           fi
 
+      - name: Login to ghcr.io for skopeo inspect
+        run: |
+          # skopeo does not inherit podman's login session — explicit login required
+          # Must run before any skopeo inspect step (including Verify image index shape)
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            skopeo login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+
       - name: Create OCI image indexes
         run: |
           APP="${{ matrix.app }}"
           ARCH="${{ matrix.arch }}"
           OWNER="${{ github.repository_owner }}"
+          [[ -f /tmp/digest.txt ]] || { echo "ERROR: /tmp/digest.txt not found — Push step may not have run" >&2; exit 1; }
           DIGEST=$(cat /tmp/digest.txt)
           [[ -n "${DIGEST}" ]] || { echo "ERROR: /tmp/digest.txt is empty — per-arch push may have failed" >&2; exit 1; }
 
           case "${ARCH}" in
             x86_64)  OCI_ARCH="amd64" ;;
             aarch64) OCI_ARCH="arm64" ;;
-            *)       OCI_ARCH="${ARCH}" ;;
+            *)       echo "ERROR: unknown arch ${ARCH} — add OCI_ARCH mapping to case statement" >&2; exit 1 ;;
           esac
 
           # latest index — always (build.yml is the sole manager of the latest tag)
@@ -362,18 +370,14 @@ jobs:
         run: |
           APP="${{ matrix.app }}"
           OWNER="${{ github.repository_owner }}"
-          COUNT=$(skopeo inspect --raw \
-            "docker://ghcr.io/${OWNER}/${APP}:latest" \
-            | jq '.manifests | length')
+          RAW=$(skopeo inspect --raw "docker://ghcr.io/${OWNER}/${APP}:latest")
+          MEDIA_TYPE=$(echo "${RAW}" | jq -r '.mediaType')
+          [[ "${MEDIA_TYPE}" == "application/vnd.oci.image.index.v1+json" ]] \
+            || { echo "ERROR: expected OCI index, got ${MEDIA_TYPE}" >&2; exit 1; }
+          COUNT=$(echo "${RAW}" | jq '.manifests | length')
           [[ "${COUNT}" -ge 1 ]] \
-            && echo "==> latest index has ${COUNT} platform(s)" \
+            && echo "==> latest index has ${COUNT} platform(s) [${MEDIA_TYPE}]" \
             || { echo "ERROR: latest is not an image index" >&2; exit 1; }
-
-      - name: Login to ghcr.io for skopeo inspect
-        run: |
-          # skopeo does not inherit podman's login session — explicit login required
-          echo "${{ secrets.GITHUB_TOKEN }}" | \
-            skopeo login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
 
       - name: Verify labels on ghcr.io
         run: |
