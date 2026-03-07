@@ -38,8 +38,7 @@ jobs:
           APP="${{ inputs.app }}"
           for TAG in ${{ inputs.tags }}; do
             VERSION_ID=$(gh api "/user/packages/container/${APP}/versions" \
-              --jq --arg tag "${TAG}" \
-              '.[] | select(.metadata.container.tags[] == $tag) | .id' \
+              --jq ".[] | select(.metadata.container.tags[] == \"${TAG}\") | .id" \
               || true)
             if [[ -n "${VERSION_ID}" ]]; then
               gh api --method DELETE "/user/packages/container/${APP}/versions/${VERSION_ID}"

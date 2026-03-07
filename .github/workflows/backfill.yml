@@ -242,8 +242,7 @@ jobs:
         run: |
           APP="${{ inputs.app }}"
           VERSION_ID=$(gh api "/user/packages/container/${APP}/versions" \
-            --jq --arg tag "${STAGING_TAG}" \
-            '.[] | select(.metadata.container.tags[] == $tag) | .id' \
+            --jq ".[] | select(.metadata.container.tags[] == \"${STAGING_TAG}\") | .id" \
             || true)
           if [[ $(echo "${VERSION_ID}" | grep -c .) -gt 1 ]]; then
             echo "ERROR: multiple versions matched staging tag ${STAGING_TAG} — manual cleanup required" >&2
