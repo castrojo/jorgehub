@@ -170,6 +170,37 @@ jobs:
           DIGEST=$(cat /tmp/digest.txt)
           echo "==> Pushed ${TARGET} @ ${DIGEST} — layers: ${LAYER_COUNT}"
 
+      - name: Create OCI image index
+        run: |
+          VERSION="${{ inputs.version }}"
+          APP="${{ inputs.app }}"
+          ARCH="${{ matrix.arch }}"
+          OWNER="${{ github.repository_owner }}"
+          DIGEST=$(cat /tmp/digest.txt)
+          [[ -n "${DIGEST}" ]] || { echo "ERROR: /tmp/digest.txt is empty — per-arch push may have failed" >&2; exit 1; }
+
+          # Map GHA arch name to OCI platform arch
+          case "${ARCH}" in
+            x86_64)  OCI_ARCH="amd64" ;;
+            aarch64) OCI_ARCH="arm64" ;;
+            *)       OCI_ARCH="${ARCH}" ;;
+          esac
+
+          # Create local manifest list and add the per-arch manifest by digest
+          podman manifest rm "localhost/${APP}:${VERSION}" 2>/dev/null || true
+          podman manifest create "localhost/${APP}:${VERSION}"
+          podman manifest add \
+            --arch "${OCI_ARCH}" --os linux \
+            "localhost/${APP}:${VERSION}" \
+            "docker://ghcr.io/${OWNER}/${APP}@${DIGEST}"
+
+          # Push index only — per-arch blobs already in registry, --all not needed
+          podman manifest push \
+            --format oci \
+            "localhost/${APP}:${VERSION}" \
+            "docker://ghcr.io/${OWNER}/${APP}:${VERSION}"
+          echo "==> Pushed image index ghcr.io/${OWNER}/${APP}:${VERSION} → ${ARCH} @ ${DIGEST}"
+
       - name: Login to ghcr.io for skopeo inspect
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | \
