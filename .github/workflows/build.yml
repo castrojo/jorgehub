@@ -309,6 +309,7 @@ jobs:
             "${CHUNKED}" "docker://${TARGET}"
           DIGEST=$(cat /tmp/digest.txt)
           echo "STAGING_TAG=${STAGING_TAG}" >> "$GITHUB_ENV"
+          echo "${STAGING_TAG}" > /tmp/staging-tag.txt
           echo "==> Pushed staging tag ${TARGET} @ ${DIGEST} — layers: ${LAYER_COUNT}"
 
       - name: Login to ghcr.io for skopeo inspect
@@ -408,45 +409,12 @@ jobs:
           path: /tmp/digest.txt
           retention-days: 1
 
-      - name: Delete staging tag
-        run: |
-          APP="${{ matrix.app }}"
-          VERSION_ID=$(gh api "/user/packages/container/${APP}/versions" \
-            --jq ".[] | select(.metadata.container.tags[] == \"${STAGING_TAG}\") | .id" \
-            || true)
-          if [[ $(echo "${VERSION_ID}" | grep -c .) -gt 1 ]]; then
-            echo "ERROR: multiple versions matched staging tag ${STAGING_TAG} — manual cleanup required" >&2
-            exit 1
-          fi
-          if [[ -n "${VERSION_ID}" ]]; then
-            gh api --method DELETE "/user/packages/container/${APP}/versions/${VERSION_ID}"
-            echo "==> Deleted staging tag ${STAGING_TAG} (version ID ${VERSION_ID})"
-          else
-            echo "WARNING: staging tag ${STAGING_TAG} not found — may already be deleted"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set package description
-        run: |
-          APP="${{ matrix.app }}"
-          DESC_FILE="flatpaks/${APP}/release.yaml"
-          if [[ -f "${DESC_FILE}" ]]; then
-            DESCRIPTION=$(yq '.description' "${DESC_FILE}")
-            [[ "${DESCRIPTION}" != "null" && -n "${DESCRIPTION}" ]] || { echo "==> No description in release.yaml, skipping"; exit 0; }
-            # Note: PATCH /user/packages/container/<name> returns 404 for user-scoped packages
-            # (same limitation as visibility — web UI only). Best-effort, non-fatal.
-            if gh api --method PATCH "/user/packages/container/${APP}" \
-                -f description="${DESCRIPTION}" 2>/dev/null; then
-              echo "==> Set package description: ${DESCRIPTION}"
-            else
-              echo "==> WARNING: Could not set package description via API (known GitHub limitation — set manually in web UI)"
-            fi
-          else
-            echo "==> No release.yaml for ${APP}, skipping package description"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload staging tag artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: staging-tag-${{ matrix.app }}-${{ matrix.arch }}
+          path: /tmp/staging-tag.txt
+          retention-days: 1
 
   # ── Update gh-pages index ──────────────────────────────────────────────────
   update-index:
@@ -518,3 +486,71 @@ jobs:
             git commit -m "chore(index): update from build ${{ github.run_number }} [skip ci]"
             git push
           fi
+
+  # ── Delete staging tags + set package description ─────────────────────────
+  # Runs after update-index so skopeo inspect in update-index.py can still
+  # resolve manifests by digest (ghcr.io returns manifest unknown for bare
+  # digest refs once no tag points to the manifest).
+  cleanup:
+    needs: [detect, update-index]
+    if: needs.detect.outputs.apps != '[]' && needs.detect.outputs.apps != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJson(needs.detect.outputs.apps) }}
+        arch: [x86_64]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download staging tag artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: staging-tag-${{ matrix.app }}-${{ matrix.arch }}
+          path: /tmp/staging-tags
+
+      - name: Delete staging tag
+        run: |
+          APP="${{ matrix.app }}"
+          STAGING_TAG=$(cat /tmp/staging-tags/staging-tag.txt)
+          [[ -n "${STAGING_TAG}" ]] || { echo "ERROR: staging-tag.txt is empty" >&2; exit 1; }
+          VERSION_ID=$(gh api "/user/packages/container/${APP}/versions" \
+            --jq ".[] | select(.metadata.container.tags[] == \"${STAGING_TAG}\") | .id" \
+            || true)
+          MATCH_COUNT=$(echo "${VERSION_ID}" | grep -c . || true)
+          if [[ "${MATCH_COUNT}" -gt 1 ]]; then
+            echo "ERROR: multiple versions matched staging tag ${STAGING_TAG} — manual cleanup required" >&2
+            exit 1
+          fi
+          if [[ -n "${VERSION_ID}" ]]; then
+            gh api --method DELETE "/user/packages/container/${APP}/versions/${VERSION_ID}"
+            echo "==> Deleted staging tag ${STAGING_TAG} (version ID ${VERSION_ID})"
+          else
+            echo "WARNING: staging tag ${STAGING_TAG} not found — may already be deleted"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set package description
+        run: |
+          APP="${{ matrix.app }}"
+          DESC_FILE="flatpaks/${APP}/release.yaml"
+          if [[ -f "${DESC_FILE}" ]]; then
+            DESCRIPTION=$(yq '.description' "${DESC_FILE}")
+            [[ "${DESCRIPTION}" != "null" && -n "${DESCRIPTION}" ]] || { echo "==> No description in release.yaml, skipping"; exit 0; }
+            # Note: PATCH /user/packages/container/<name> returns 404 for user-scoped packages
+            # (same limitation as visibility — web UI only). Best-effort, non-fatal.
+            if gh api --method PATCH "/user/packages/container/${APP}" \
+                -f description="${DESCRIPTION}" 2>/dev/null; then
+              echo "==> Set package description: ${DESCRIPTION}"
+            else
+              echo "==> WARNING: Could not set package description via API (known GitHub limitation — set manually in web UI)"
+            fi
+          else
+            echo "==> No release.yaml for ${APP}, skipping package description"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
