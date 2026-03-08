@@ -3,11 +3,18 @@ name: Cleanup — Delete Package Versions
 # One-time / on-demand workflow to delete named tags and untagged versions
 # from a ghcr.io package.
 #
-# Example: delete existing per-arch tags and ghost versions for goose:
+# DANGER: delete_untagged=true WILL BREAK OCI image indexes.
+# OCI image indexes reference content manifests by digest. Content manifests
+# are kept alive by their "content-<digest_short>" tag (applied by build.yml
+# and backfill.yml). Deleting untagged versions is safe only if all content
+# manifests have been properly retagged. Never use delete_untagged=true to
+# clean up after builds that predate 2026-03-08 — those content manifests
+# are untagged and their indexes are already broken.
+#
+# Example: delete old per-arch tags for goose:
 #   gh workflow run cleanup.yml \
 #     -f app=goose \
-#     -f tags="latest-x86_64 v1.27.1-x86_64 v1.26.2-x86_64 v1.25.3-x86_64" \
-#     -f delete_untagged=true
+#     -f tags="latest-x86_64 v1.27.1-x86_64 v1.26.2-x86_64 v1.25.3-x86_64"
 
 on:
   workflow_dispatch:

@@ -238,9 +238,29 @@ jobs:
             && { echo "ERROR: one or more layers missing zstd:chunked annotation" >&2; exit 1; } \
             || echo "==> All ${LAYER_COUNT} layers are zstd:chunked"
 
-      - name: Delete staging tag
+      - name: Retag content manifest and delete staging tag
         run: |
           APP="${{ inputs.app }}"
+          OWNER="${{ github.repository_owner }}"
+          # ghcr.io permanently deletes a manifest when its version is deleted.
+          # OCI image indexes reference content manifests by digest — if the content
+          # manifest version is deleted, the index breaks ("manifest unknown").
+          # Fix: retag content manifest as "content-<digest_short>" before deletion,
+          # so the manifest stays alive under a permanent non-user-facing tag.
+          DIGEST=$(gh api "/user/packages/container/${APP}/versions" \
+            --jq ".[] | select(.metadata.container.tags[] == \"${STAGING_TAG}\") | .name" \
+            || true)
+          if [[ -n "${DIGEST}" ]]; then
+            DIGEST_SHORT="${DIGEST:7:12}"
+            CONTENT_TAG="content-${DIGEST_SHORT}"
+            skopeo copy \
+              "docker://ghcr.io/${OWNER}/${APP}@${DIGEST}" \
+              "docker://ghcr.io/${OWNER}/${APP}:${CONTENT_TAG}"
+            echo "==> Retagged content manifest ${DIGEST} as ${CONTENT_TAG}"
+          else
+            echo "WARNING: staging tag ${STAGING_TAG} not found — skipping retag"
+          fi
+          # Now safe to delete the staging tag version
           VERSION_ID=$(gh api "/user/packages/container/${APP}/versions" \
             --jq ".[] | select(.metadata.container.tags[] == \"${STAGING_TAG}\") | .id" \
             || true)

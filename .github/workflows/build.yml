@@ -487,10 +487,15 @@ jobs:
             git push
           fi
 
-  # ── Delete staging tags + set package description ─────────────────────────
+  # ── Retag content manifests, delete staging tags, set package description ──
   # Runs after update-index so skopeo inspect in update-index.py can still
-  # resolve manifests by digest (ghcr.io returns manifest unknown for bare
-  # digest refs once no tag points to the manifest).
+  # reference the staging tag.
+  #
+  # IMPORTANT: ghcr.io permanently deletes a manifest's blobs when its version
+  # is deleted. An OCI image index references the content manifest by digest —
+  # if the content manifest version is deleted, the index becomes broken
+  # ("manifest unknown"). To prevent this, we first retag the content manifest
+  # as "content-<digest_short>" before deleting the staging tag version.
   cleanup:
     needs: [detect, update-index]
     if: needs.detect.outputs.apps != '[]' && needs.detect.outputs.apps != ''
@@ -512,11 +517,36 @@ jobs:
           name: staging-tag-${{ matrix.app }}-${{ matrix.arch }}
           path: /tmp/staging-tags
 
-      - name: Delete staging tag
+      - name: Login to ghcr.io for skopeo
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            skopeo login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+
+      - name: Retag content manifest and delete staging tag
         run: |
           APP="${{ matrix.app }}"
+          OWNER="${{ github.repository_owner }}"
           STAGING_TAG=$(cat /tmp/staging-tags/staging-tag.txt)
           [[ -n "${STAGING_TAG}" ]] || { echo "ERROR: staging-tag.txt is empty" >&2; exit 1; }
+          # ghcr.io permanently deletes a manifest when its version is deleted.
+          # OCI image indexes reference content manifests by digest — if the content
+          # manifest version is deleted, the index breaks ("manifest unknown").
+          # Fix: retag content manifest as "content-<digest_short>" before deletion,
+          # so the manifest stays alive under a permanent non-user-facing tag.
+          DIGEST=$(gh api "/user/packages/container/${APP}/versions" \
+            --jq ".[] | select(.metadata.container.tags[] == \"${STAGING_TAG}\") | .name" \
+            || true)
+          if [[ -n "${DIGEST}" ]]; then
+            DIGEST_SHORT="${DIGEST:7:12}"
+            CONTENT_TAG="content-${DIGEST_SHORT}"
+            skopeo copy \
+              "docker://ghcr.io/${OWNER}/${APP}@${DIGEST}" \
+              "docker://ghcr.io/${OWNER}/${APP}:${CONTENT_TAG}"
+            echo "==> Retagged content manifest ${DIGEST} as ${CONTENT_TAG}"
+          else
+            echo "WARNING: staging tag ${STAGING_TAG} not found — skipping retag"
+          fi
+          # Now safe to delete the staging tag version
           VERSION_ID=$(gh api "/user/packages/container/${APP}/versions" \
             --jq ".[] | select(.metadata.container.tags[] == \"${STAGING_TAG}\") | .id" \
             || true)
